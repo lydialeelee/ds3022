@@ -67,14 +67,54 @@ def ingest_data():
     # if you need to see a working example of this, see this file in this repo
     # 04_apis/05_pagination.py
 
-    # just a placeholder for now. remove the print below this is built out
-    print("something")
+    all_commits = []                    # every commit from every page ends up here
+    url = URL                           # start at page 1
+    params = {"per_page": PER_PAGE}     # only needed on the first request
+    page = 1
+
+    # keep going while there's a next page AND we haven't hit our page limit
+    while url and page <= PAGES:
+        response = httpx.get(url, headers=HEADERS, params=params, timeout=30)
+        response.raise_for_status()
+        commits = response.json()
+        all_commits.extend(commits)     # add this page's 100 commits to the big list
+        print(f"page {page}: {len(commits)} commits (total {len(all_commits)})")
+
+        url = response.links.get("next", {}).get("url")  # None on the last page -> loop ends
+        params = None                   # the next URL already has per_page & page in it
+        page += 1
+
+    # save the raw JSON (gitignored folder) so DuckDB can parse it
+    raw_dir = Path(__file__).parent / "github_data"
+    raw_dir.mkdir(exist_ok=True)
+    raw_file = raw_dir / "commits.json"
+    raw_file.write_text(json.dumps(all_commits))
+
+    # one table, rebuilt each run so re-running doesn't duplicate rows
+    try:
+        conn.execute(f"""
+            CREATE OR REPLACE TABLE commits AS
+            SELECT sha,
+                   commit.author.name                     AS author_name,
+                   author.login                           AS author_login,  -- null if email isn't linked to a GH account
+                   commit.author.date::TIMESTAMPTZ        AS committed_at,
+                   split_part(commit.message, chr(10), 1) AS message,       -- first line only
+                   html_url                               AS url
+            FROM read_json('{raw_file}')
+        """)
+        print(f"loaded commits into actions.duckdb from {raw_file}")
+    except duckdb.Error as e:
+        print(f"DuckDB load failed: {e}")
+        raise  # re-raise so Prefect marks the task Failed (and retries)
+
+    return all_commits
 
 
 # name the flow something you can identify as yourself
-@flow(name="nem2p-flow")
+@flow(name="yzg7bf-flow")
 def main_flow():
     ingest_data()
 
-# it doesn't seem this flow executes when you run it. Why?
-# fix it ;^)
+# only run the flow when this file is executed directly (not when imported)
+if __name__ == "__main__":
+    main_flow()
